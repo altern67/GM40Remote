@@ -1,0 +1,49 @@
+	Onglet about
+
+
+	Settings
+		-> channel midi
+		-> OMNI mode
+		-> Power EQ mode : preset ou global (de quoi s'agit-il ? c'est pour le black spirit 200 remote)
+		-> Power soak mode : preset ou global
+		->
+
+
+BUG
+	ne reprend pas presence et resonance au démarrage si global mis en place
+
+
+
+
+
+
+
+
+	Pour gérer un preset sur le Hughes & Kettner GrandMeister Deluxe 40 (et dans votre logiciel), il faut distinguer trois zones de mémoire différentes :
+
+1. Les 3 niveaux de mémoire
+
+• La mémoire interne de l'ampli (128 emplacements permanents) : Numérotés de 1 à 128 (organisés en 32 banques de 1 à 32, avec 4 slots A, B, C, D par banque). L'ampli ne stocke que les valeurs numériques des potentiomètres et boutons — il ne connaît pas le nom textuel des presets.
+• L'Edit Buffer de l'ampli (mémoire temporaire d'écoute) : Dès que vous sélectionnez un preset, l'ampli copie ses réglages dans une zone tampon temporaire. Si vous tournez un potentiomètre sur l'ampli ou dans votre logiciel, c'est uniquement cet Edit Buffer qui est modifié en temps réel (tant que vous n'appuyez pas sur Store sur l'ampli ou n'envoyez pas une trame de sauvegarde SysEx).
+• La bibliothèque du logiciel (.gm40 en mémoire vive) : Votre application conserve deux listes parallèles de 128 presets :
+	• m_originalPresets : La copie de référence intacte chargée depuis le fichier .gm40 (ou votre backup), utilisée par les boutons Compare et Restore Orig..
+	• m_workingPresets : Votre espace de travail contenant les noms des presets et vos réglages modifiés.
+
+2. Ce qui se passe lors d'une action dans votre logiciel
+
+• Changer de preset (+, - ou liste des 128 presets) :
+	1. Le logiciel sauvegarde vos retouches en cours dans m_workingPresets pour le preset que vous quittez.
+	2. Il affiche le nom et la position des boutons du nouveau preset depuis m_workingPresets.
+	3. Il envoie un message MIDI Program Change (0 à 127) à l'ampli, qui charge alors son propre emplacement mémoire correspondant.
+• Tourner un potentiomètre ou cliquer sur un switch :
+	• Le logiciel envoie une trame SysEx courte (15 octets) contenant l'identifiant du contrôle (ex. 56 pour le Gain) et sa valeur (0 à 255). L'ampli applique le changement immédiatement dans son Edit Buffer sans écraser sa mémoire permanente.
+• Sauvegarder sur l'ordinateur (Save / Save As) :
+	• Écrit l'intégralité de m_workingPresets (les 128 noms + tous les réglages) dans un fichier texte .gm40 sur votre disque. Cela ne modifie pas encore la mémoire interne de l'ampli.
+• Lire la mémoire de l'ampli (Backup) :
+	• Interroge successivement les 128 emplacements de l'ampli (trames de 47 octets) pour mettre à jour m_workingPresets avec les réglages réels stockés dans l'amplificateur, tout en conservant vos noms de presets.
+
+3. Ce qu'il reste à connecter pour écrire dans l'ampli
+
+Pour que vos modifications logicielles soient enregistrées durablement à l'intérieur de l'amplificateur (sans avoir à appuyer physiquement sur le bouton Store de la façade), il reste à implémenter deux actions présentes dans votre interface :
+• Send to Amp : Encode le preset actif (m_workingPresets[m_currentPreset]) en une trame SysEx longue de 47 octets et l'envoie vers l'emplacement mémoire choisi dans l'ampli.
+• Restore : Envoie les 128 trames de 47 octets d'un fichier .gm40 pour restaurer toute la mémoire de l'amplificateur.

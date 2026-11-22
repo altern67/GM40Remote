@@ -1,0 +1,24 @@
+# Répertoires de compilation Qt Creator / qmake
+build/
+build-*/
+*.pro.user
+*.pro.user.*
+
+# Fichiers générés automatiquement par Qt (moc, uic, rcc)
+Makefile
+Makefile.*
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.o
+*.obj
+.qmake.stash
+
+# Binaires compilés
+GM40Remote
+GM40Remote_Gemini
+
+# Fichiers temporaires système / éditeurs
+*~
+.DS_Store
