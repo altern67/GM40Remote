@@ -1903,66 +1903,88 @@ void MainWindow::sendPresetToAmp(int slotIndex, const PresetData &p)
     int finalPresence  = m_globalPowerEq   ? refPreset.presence  : p.presence;
     int finalPowerSoak = m_globalPowerSoak ? refPreset.powerSoak : p.powerSoak;
 
-    // Préparation de la trame officielle de 47 octets (commande 0x40)
-    unsigned char sysex[47] = {0};
-    sysex[0] = 0xF0; sysex[1] = 0x00; sysex[2] = 0x20; sysex[3] = 0x44;
-    sysex[4] = 0x00; sysex[5] = 0x10; sysex[6] = 0x00; sysex[7] = 0x09;
-    sysex[8] = 0x00; sysex[9] = 0x40;
+    // 1. Préparation de la trame officielle de 47 octets via QByteArray (sans crochets numériques)
+    QByteArray sysex;
+    sysex.reserve(47);
 
-    // Numéro du preset cible (0..127)
-    sysex[10] = 0x00;
-    sysex[11] = static_cast<unsigned char>(targetSlot);
-    sysex[12] = static_cast<unsigned char>(targetSlot);
+    // En-tête Hughes & Kettner GM40 (octets 0 à 9)
+    sysex.append(char(0xF0));
+    sysex.append(char(0x00));
+    sysex.append(char(0x20));
+    sysex.append(char(0x44));
+    sysex.append(char(0x00));
+    sysex.append(char(0x10));
+    sysex.append(char(0x00));
+    sysex.append(char(0x09)); // ID officiel GM40 en émission
+    sysex.append(char(0x00));
+    sysex.append(char(0x40));
 
-    // Helper pour encoder une valeur 0..255 sur 2 octets 7-bit (MSB, LSB)
-    auto write14Bit = [&](int msbIdx, int val) {
+    // Adresse mémoire du preset cible (octets 10=0x00, 11=0x00, 12=targetSlot)
+    sysex.append(char(0x00));
+    sysex.append(char(0x00));
+    sysex.append(static_cast<char>(targetSlot));
+
+    // Helper pour ajouter une valeur 0..255 sur 2 octets 7-bit (MSB, LSB)
+    auto append14Bit = [&](int val) {
         int clamped = std::clamp(val, 0, 255);
-        sysex[msbIdx]     = static_cast<unsigned char>((clamped >> 7) & 0x7F);
-        sysex[msbIdx + 1] = static_cast<unsigned char>(clamped & 0x7F);
+        sysex.append(static_cast<char>((clamped >> 7) & 0x7F));
+        sysex.append(static_cast<char>(clamped & 0x7F));
     };
 
-    // Encodage des 13 potentiomètres dans l'ordre exact du protocole GM40
-    write14Bit(13, p.gain);
-    write14Bit(15, p.bass);
-    write14Bit(17, p.mid);
-    write14Bit(19, p.volume);
-    write14Bit(21, p.treble);
-    write14Bit(23, finalResonance);
-    write14Bit(25, finalPresence);
-    write14Bit(27, p.reverb);
-    write14Bit(29, p.delayLevel);
-    write14Bit(31, p.delayTime);
-    write14Bit(33, p.delayFeedback);
-    write14Bit(35, p.modIntensity);
-    write14Bit(37, p.modType);
+    // Encodage des 13 potentiomètres dans l'ordre exact du protocole GM40 (octets 13 à 38)
+    append14Bit(p.gain);
+    append14Bit(p.bass);
+    append14Bit(p.mid);
+    append14Bit(p.volume);
+    append14Bit(p.treble);
+    append14Bit(finalResonance);
+    append14Bit(finalPresence);
+    append14Bit(p.reverb);
+    append14Bit(p.delayLevel);
+    append14Bit(p.delayTime);
+    append14Bit(p.delayFeedback);
+    append14Bit(p.modIntensity);
+    append14Bit(p.modType);
+
+    // Octets réservés 39 à 42 (4 octets nuls)
+    sysex.append(char(0x00));
+    sysex.append(char(0x00));
+    sysex.append(char(0x00));
+    sysex.append(char(0x00));
 
     // Octet 43 (qqByte) : Noise Gate
-    sysex[43] = (p.noiseGate != 0) ? 0x01 : 0x00;
+    sysex.append((p.noiseGate != 0) ? char(0x01) : char(0x00));
 
     // Octet 44 (rrByte) : Channel + Boost + FX Loop + Power Soak
     int chIdx   = std::clamp(static_cast<int>(std::round(p.channelType / 42.0)), 0, 3);
     int boost   = (p.channelBoost != 0) ? 4 : 0;
     int fxLoop  = (p.fxLoop != 0) ? 8 : 0;
     int soakId  = std::clamp(static_cast<int>(std::round(finalPowerSoak / 31.0)), 0, 4);
-    sysex[44]   = static_cast<unsigned char>(chIdx + boost + fxLoop + (soakId * 16));
+    sysex.append(static_cast<char>(chIdx + boost + fxLoop + (soakId * 16)));
 
-    // Calcul du Checksum XOR (octets 4 à 44 ^ 0x14)
+    // Octet 45 : Calcul du Checksum XOR (octets 4 à 44 ^ 0x14)
     unsigned char xorSum = 0x14;
     for (int i = 4; i <= 44; ++i) {
-        xorSum ^= sysex[i];
+        xorSum ^= static_cast<unsigned char>(sysex.at(i));
     }
-    sysex[45] = xorSum & 0x7F;
-    sysex[46] = 0xF7;
+    sysex.append(static_cast<char>(xorSum & 0x7F));
+
+    // Octet 46 : Fin de trame SysEx
+    sysex.append(char(0xF7));
 
     snd_seq_event_t ev;
     snd_seq_ev_clear(&ev);
     snd_seq_ev_set_source(&ev, localPort);
     snd_seq_ev_set_subs(&ev);
     snd_seq_ev_set_direct(&ev);
-    snd_seq_ev_set_sysex(&ev, sizeof(sysex), sysex);
+    snd_seq_ev_set_sysex(&ev, sysex.size(), sysex.data());
     snd_seq_event_output(seq, &ev);
     snd_seq_drain_output(seq);
 }
+
+
+
+
 
 
 
