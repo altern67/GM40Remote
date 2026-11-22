@@ -612,7 +612,7 @@ void MainWindow::createMenus()
                                        "<p>ALSA MIDI &amp; SysEx control interface for GrandMeister Deluxe 40.</p>"
                                        "<p><b>Author:</b> altern67<br>"
                                        "<b>Contact:</b> <a href='mailto:altern67@yahoo.com'>altern67@yahoo.com</a><br>"
-                                       "<b>GitHub:</b> <a href='https://github.com'>://github.com</a><br>"
+                                       "<b>GitHub:</b> <a href='https://github.com/altern67/GM40Remote.git'>://github.com</a><br>"
                                        "<b>License:</b> GNU GPL v3</p>")
                                    .arg(qApp->applicationVersion()));
         });

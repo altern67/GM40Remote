@@ -36,10 +36,10 @@ sudo pacman -S base-devel qt6-base alsa-lib
 ## Build & Run
 
 ```bash
-git clone https://github.com
+git clone https://github.com/altern67/GM40Remote.git
 cd GM40Remote
 qmake6
-make -j\$(nproc)
+make -j4
 ./GM40Remote
 ```
 
