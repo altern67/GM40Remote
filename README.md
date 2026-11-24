@@ -12,6 +12,10 @@ A native Linux desktop control interface and preset library manager for the **Hu
 * **Library Editor**: Dual-pane preset organizer to import presets from external `.gm40` banks, copy, swap, reorder setlists, rename, or audition presets live on the amp.
 * **Full Backup & Restore**: One-click 128-preset dump from/to the amplifier and Factory Reset support.
 * **Global Settings & Custom Shortcuts**: Configurable MIDI channel (1–16 or OMNI), Global Power Soak / Global Power Amp EQ toggles, and customizable multi-key shortcuts.
+* **Single Preset Import/Export (`.gmp`)**: Export or import individual presets with overwrite confirmation.
+* **Synchronized Disk & Amp Workflow**: Unified Save / Save As actions that keep your local `.gm40` library and amplifier flash memory in sync.
+* **Enhanced Library Editor**: Dual-pane organizer with live parameter preview, drag-and-drop, multi-select batch import, and Auto-Audition on click.
+
 
 ## Dependencies
 

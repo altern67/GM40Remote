@@ -5,6 +5,7 @@
 #include "presetselectordialog.h"
 #include "shortcutsdialog.h"
 #include "libraryeditordialog.h"
+#include <QRegularExpression>
 
 
 
@@ -199,24 +200,31 @@ MainWindow::MainWindow(QWidget *parent)
 
 
     // SECTION ACTIVE PRESET
-    // --- BOUTON "Save HD" : met à jour le preset actif dans le fichier de backup ---
+    // --- BOUTON UNIQUE "Save" : enregistre sur le disque dur ET dans l'ampli ---
     connect(ui->btnSave, &QPushButton::clicked, this, [this]() {
-        // 1. Capture l'état actuel de l'écran et le place dans le preset actif en mémoire
-        m_workingPresets[m_currentPreset] = captureCurrentUiState();
+        PresetData current = captureCurrentUiState();
+        m_workingPresets[m_currentPreset] = current;
         m_isComparingOriginal = false;
         ui->btnCompare->setStyleSheet("");
-        // 2. Récupère le chemin exact du fichier de backup (~/.config/HughesKettner/backup_gm40.gm40)
+
         QSettings settings("HughesKettner", "GM40Remote");
         QString configDir  = QFileInfo(settings.fileName()).absolutePath();
         QDir().mkpath(configDir);
-        QString backupPath = configDir + "/backup_gm40.gm40";
-        // 3. Écrit toute la liste (avec ce preset mis à jour) dans le fichier de backup
-        saveGm40File(backupPath);
+        QString targetFile = (!m_currentLibraryPath.isEmpty() && !m_currentLibraryPath.startsWith(":/"))
+                                 ? m_currentLibraryPath
+                                 : (configDir + "/backup_gm40.gm40");
+
+        saveGm40File(targetFile);
+
+        if (seq) {
+            sendPresetToAmp(m_currentPreset, current);
+            ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>💾 [SYNC] Preset %1 (%2) saved to Disk &amp; Amplifier.</font>")
+                                        .arg(m_currentPreset + 1)
+                                        .arg(current.name));
+        }
     });
-    // --- BOUTON "Save to Amp" : écrit le preset actif dans la mémoire interne de l'ampli ---
-    connect(ui->btnSendAmp, &QPushButton::clicked, this, &MainWindow::sendCurrentPresetToAmp);
-    // --- BOUTON "Save to HD number" : enregistre dans le backup et propose l'écriture dans l'ampli ---
-    connect(ui->btnSaveAsHD, &QPushButton::clicked, this, [this]() {
+    // --- BOUTON UNIQUE "Save As..." : choisit un emplacement (1..128) et écrit sur Disque + Ampli ---
+    connect(ui->btnSaveAs, &QPushButton::clicked, this, [this]() {
         PresetData currentPresetData = captureCurrentUiState();
 
         QStringList names;
@@ -226,7 +234,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
 
         PresetSelectorDialog dlg(names, m_currentPreset, this);
-        dlg.setWindowTitle(QString("Save '%1' to which slot ?").arg(currentPresetData.name));
+        dlg.setWindowTitle(QString("Save '%1' to which slot?").arg(currentPresetData.name));
 
         if (dlg.exec() == QDialog::Accepted) {
             int destIdx = dlg.selectedPresetIndex();
@@ -237,95 +245,149 @@ MainWindow::MainWindow(QWidget *parent)
                 m_currentPreset = destIdx;
                 m_isComparingOriginal = false;
                 ui->btnCompare->setStyleSheet("");
-                // 1. Sauvegarde dans ~/.config/HughesKettner/backup_gm40.gm40
+
+                // 1. Sauvegarde sur le disque dur
                 QSettings settings("HughesKettner", "GM40Remote");
                 QString configDir  = QFileInfo(settings.fileName()).absolutePath();
                 QDir().mkpath(configDir);
-                saveGm40File(configDir + "/backup_gm40.gm40");
+                QString targetFile = (!m_currentLibraryPath.isEmpty() && !m_currentLibraryPath.startsWith(":/"))
+                                         ? m_currentLibraryPath
+                                         : (configDir + "/backup_gm40.gm40");
+                saveGm40File(targetFile);
+
+                // 2. Écriture simultanée dans l'amplificateur (si connecté)
+                if (seq) {
+                    sendPresetToAmp(destIdx, currentPresetData);
+                    sendMidiProgramChange(destIdx);
+                    ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>💾 [SYNC] Preset '%1' saved to slot #%2 (Disk &amp; Amplifier).</font>")
+                                                .arg(currentPresetData.name)
+                                                .arg(destIdx + 1));
+                }
 
                 updatePresetDisplay();
                 applyPresetToUi(m_workingPresets[m_currentPreset], false);
-
-                ui->midiLog->appendHtml(QString("<font color='#45e28a'>💾 Preset '%1' saved to slot %2 on disk.</font>")
-                                            .arg(currentPresetData.name)
-                                            .arg(destIdx + 1));
-                // 2. Demande si on copie également dans la mémoire interne de l'ampli
-                auto reply = QMessageBox::question(this,
-                                                   "Send to Amplifier",
-                                                   QString("Do you also want to copy preset '%1' into internal amp memory slot #%2 ?")
-                                                       .arg(currentPresetData.name)
-                                                       .arg(destIdx + 1),
-                                                   QMessageBox::Yes | QMessageBox::No);
-
-                if (reply == QMessageBox::Yes) {
-                    if (!seq) {
-                        QMessageBox::warning(this, "MIDI Disconnected", "The amplifier is not connected via MIDI.");
-                    } else {
-                        sendPresetToAmp(destIdx, currentPresetData);
-                        sendMidiProgramChange(destIdx);
-                        ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>📤 Preset %1 written to internal amp memory.</font>")
-                                                    .arg(destIdx + 1));
-                    }
-                } else {
-                    sendMidiProgramChange(m_currentPreset);
-                }
             }
         }
     });
-    // --- BOUTON "Save to Amp number" : écrit dans l'ampli et propose l'enregistrement dans le backup ---
-    connect(ui->btnSaveAsAmp, &QPushButton::clicked, this, [this]() {
-        if (!seq) {
-            QMessageBox::warning(this, "MIDI Disconnected", "Please connect to the amplifier first.");
+    // --- BOUTON "Export Preset" : exporte le preset actif en fichier .gmp ---
+    connect(ui->btnExport, &QPushButton::clicked, this, [this]() {
+        PresetData p = captureCurrentUiState();
+
+        // Propose par défaut le nom du preset nettoyé (ex. "Crunch_Solo.gmp")
+        QString safeName = p.name;
+        safeName.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+        if (safeName.isEmpty()) safeName = QString("Preset_%1").arg(m_currentPreset + 1);
+
+        QString file = QFileDialog::getSaveFileName(this,
+                                                    "Export Single Preset",
+                                                    QDir::homePath() + "/" + safeName + ".gmp",
+                                                    "GM40 Single Preset (*.gmp)");
+        if (file.isEmpty()) return;
+        if (!file.endsWith(".gmp", Qt::CaseInsensitive)) file += ".gmp";
+
+        QFile outFile(file);
+        if (!outFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, "Export Error", "Unable to write preset file to disk.");
             return;
         }
 
-        PresetData currentPresetData = captureCurrentUiState();
+        QTextStream out(&outFile);
+        out << "[preset]\n";
+        out << "name=" << p.name << "\n";
+        out << "modIntensity=" << p.modIntensity << "\n";
+        out << "powerSoak=" << p.powerSoak << "\n";
+        out << "delayTime=" << p.delayTime << "\n";
+        out << "channelType=" << p.channelType << "\n";
+        out << "noiseGate=" << p.noiseGate << "\n";
+        out << "channelBoost=" << p.channelBoost << "\n";
+        out << "bass=" << p.bass << "\n";
+        out << "mid=" << p.mid << "\n";
+        out << "treble=" << p.treble << "\n";
+        out << "modType=" << p.modType << "\n";
+        out << "resonance=" << p.resonance << "\n";
+        out << "presence=" << p.presence << "\n";
+        out << "delayFeedback=" << p.delayFeedback << "\n";
+        out << "volume=" << p.volume << "\n";
+        out << "delayLevel=" << p.delayLevel << "\n";
+        out << "gain=" << p.gain << "\n";
+        out << "reverb=" << p.reverb << "\n";
+        out << "fxLoop=" << p.fxLoop << "\n";
 
-        QStringList names;
-        names.reserve(m_workingPresets.size());
-        for (const auto &p : m_workingPresets) {
-            names.append(p.name);
+        ui->midiLog->appendHtml(QString("<font color='#45e28a'>📤 Preset '%1' exported to %2</font>")
+                                    .arg(p.name)
+                                    .arg(QFileInfo(file).fileName()));
+    });
+    // --- BOUTON "Import Preset" (ancien btnSaveAsAmp) : charge un fichier .gmp dans le preset actif ---
+    connect(ui->btnImport, &QPushButton::clicked, this, [this]() {
+        QString file = QFileDialog::getOpenFileName(this,
+                                                    "Import Single Preset",
+                                                    QDir::homePath(),
+                                                    "GM40 Single Preset (*.gmp)");
+        if (file.isEmpty()) return;
+        // Demande confirmation avant d'écraser le preset actuel
+        auto reply = QMessageBox::question(this,
+                                           "Import Preset",
+                                           QString("Overwrite current slot #%1 (%2) with '%3'?")
+                                               .arg(m_currentPreset + 1)
+                                               .arg(m_workingPresets[m_currentPreset].name)
+                                               .arg(QFileInfo(file).fileName()),
+                                           QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes) return;
+
+        QFile inFile(file);
+        if (!inFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, "Import Error", "Unable to read the selected .gmp file.");
+            return;
         }
 
-        PresetSelectorDialog dlg(names, m_currentPreset, this);
-        dlg.setWindowTitle(QString("Write '%1' to which amp slot ?").arg(currentPresetData.name));
+        PresetData imported = m_workingPresets[m_currentPreset];
+        imported.number = m_currentPreset + 1;
 
-        if (dlg.exec() == QDialog::Accepted) {
-            int destIdx = dlg.selectedPresetIndex();
-            if (destIdx >= 0 && destIdx < 128) {
-                currentPresetData.number = destIdx + 1;
-                m_workingPresets[destIdx] = currentPresetData;
-                m_currentPreset = destIdx;
-                m_isComparingOriginal = false;
-                ui->btnCompare->setStyleSheet("");
-                // 1. Envoie la trame SysEx dans la mémoire interne de l'ampli
-                sendPresetToAmp(destIdx, currentPresetData);
-                sendMidiProgramChange(destIdx);
+        QTextStream in(&inFile);
+        while (!in.atEnd()) {
+            QString line = in.readLine().trimmed();
+            if (line.isEmpty() || line == "[preset]") continue;
+            if (line.contains('=')) {
+                int eqPos = line.indexOf('=');
+                QString key = line.left(eqPos).trimmed();
+                QString val = line.mid(eqPos + 1).trimmed();
 
-                updatePresetDisplay();
-                applyPresetToUi(m_workingPresets[m_currentPreset], false);
-                ui->lblCompStatus->setText("Original ○   Modified ●");
-
-                ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>💾 [SENT] Preset '%1' written to amp slot #%2.</font>")
-                                            .arg(currentPresetData.name)
-                                            .arg(destIdx + 1));
-                // 2. Demande si on sauvegarde également au même numéro dans backup_gm40.gm40
-                auto reply = QMessageBox::question(this,
-                                                   "Save to Backup",
-                                                   QString("Do you also want to save preset '%1' to slot #%2 in your backup file ?")
-                                                       .arg(currentPresetData.name)
-                                                       .arg(destIdx + 1),
-                                                   QMessageBox::Yes | QMessageBox::No);
-
-                if (reply == QMessageBox::Yes) {
-                    QSettings settings("HughesKettner", "GM40Remote");
-                    QString configDir  = QFileInfo(settings.fileName()).absolutePath();
-                    QDir().mkpath(configDir);
-                    saveGm40File(configDir + "/backup_gm40.gm40");
-                }
+                if (key == "name")               imported.name = val;
+                else if (key == "modIntensity")  imported.modIntensity = val.toInt();
+                else if (key == "powerSoak")     imported.powerSoak = val.toInt();
+                else if (key == "delayTime")     imported.delayTime = val.toInt();
+                else if (key == "channelType")   imported.channelType = val.toInt();
+                else if (key == "noiseGate")     imported.noiseGate = val.toInt();
+                else if (key == "channelBoost")  imported.channelBoost = val.toInt();
+                else if (key == "bass")          imported.bass = val.toInt();
+                else if (key == "mid")           imported.mid = val.toInt();
+                else if (key == "treble")        imported.treble = val.toInt();
+                else if (key == "modType")       imported.modType = val.toInt();
+                else if (key == "resonance")     imported.resonance = val.toInt();
+                else if (key == "presence")      imported.presence = val.toInt();
+                else if (key == "delayFeedback") imported.delayFeedback = val.toInt();
+                else if (key == "volume")        imported.volume = val.toInt();
+                else if (key == "delayLevel")    imported.delayLevel = val.toInt();
+                else if (key == "gain")          imported.gain = val.toInt();
+                else if (key == "reverb")        imported.reverb = val.toInt();
+                else if (key == "fxLoop")        imported.fxLoop = val.toInt();
             }
         }
+
+        m_workingPresets[m_currentPreset] = imported;
+        m_isComparingOriginal = false;
+        ui->btnCompare->setStyleSheet("");
+
+        // Applique les réglages à l'écran et les envoie immédiatement à l'ampli (Edit Buffer)
+        applyPresetToUi(imported, true);
+        updatePresetDisplay();
+        markPresetAsModified();
+
+        ui->midiLog->appendHtml(QString("<font color='#45e28a'>📥 Preset '%1' imported into slot #%2 (click Save to keep permanently).</font>")
+                                    .arg(imported.name)
+                                    .arg(m_currentPreset + 1));
     });
+
 
 
 
@@ -405,14 +467,30 @@ MainWindow::MainWindow(QWidget *parent)
             m_isComparingOriginal = false;
             ui->btnCompare->setStyleSheet("");
 
-            // Sauvegarde automatiquement dans le fichier actif sur le disque dur
-            if (!m_currentLibraryPath.isEmpty() && !m_currentLibraryPath.startsWith(":/")) {
-                saveGm40File(m_currentLibraryPath);
-            }
+            // 1. Détermine le fichier disque cible et sauvegarde immédiatement les 128 presets
+            QSettings settings("HughesKettner", "GM40Remote");
+            QString configDir = QFileInfo(settings.fileName()).absolutePath();
+            QDir().mkpath(configDir);
+            QString targetFile = (!m_currentLibraryPath.isEmpty() && !m_currentLibraryPath.startsWith(":/"))
+                                     ? m_currentLibraryPath
+                                     : (configDir + "/backup_gm40.gm40");
+
+            saveGm40File(targetFile);
 
             updatePresetDisplay();
             applyPresetToUi(m_workingPresets[m_currentPreset], false);
-            ui->midiLog->appendHtml("<font color='#45e28a'>📚 Library Editor changes applied.</font>");
+            ui->midiLog->appendHtml("<font color='#45e28a'>📚 Library Editor changes saved to disk.</font>");
+
+            // 2. Synchronisation vers l'amplificateur (si connecté)
+            if (seq) {
+                auto ampReply = QMessageBox::question(this,
+                                                      "Synchronize Amplifier",
+                                                      "Do you want to write the updated 128-preset library to your amplifier now?",
+                                                      QMessageBox::Yes | QMessageBox::No);
+                if (ampReply == QMessageBox::Yes) {
+                    startFullRestore();
+                }
+            }
         } else {
             // Si l'utilisateur clique sur Cancel, on rétablit l'affichage du preset actif
             applyPresetToUi(m_workingPresets[m_currentPreset], false);
@@ -801,17 +879,29 @@ void MainWindow::connectMidi()
     QTimer::singleShot(100, this, [this]() {
         requestAmpState();
 
-        // Vérifie si le fichier de sauvegarde existe dans ~/.config/HughesKettner/
         QSettings settings("HughesKettner", "GM40Remote");
         QString configDir  = QFileInfo(settings.fileName()).absolutePath();
         QString backupPath = configDir + "/backup_gm40.gm40";
 
         if (!QFile::exists(backupPath)) {
-            ui->midiLog->appendHtml("<font color='#ffb52c'>ℹ️ No backup file found: starting automatic backup...</font>");
-            // Attend 400 ms que la synchro initiale (Config + Edit Buffer) se termine avant de lire les 128 presets
-            QTimer::singleShot(400, this, [this]() {
+            ui->midiLog->appendHtml("<font color='#ffb52c'>ℹ️ First connection: importing all 128 presets from amplifier...</font>");
+            QTimer::singleShot(400, this, [this]() { startFullBackup(false); });
+        } else {
+            // Propose de synchroniser immédiatement l'ampli et le PC
+            QMessageBox syncBox(this);
+            syncBox.setWindowTitle("Synchronize Amplifier & Library");
+            syncBox.setIcon(QMessageBox::Question);
+            syncBox.setText("Amplifier connected. How do you want to synchronize your 128 presets?");
+            QPushButton *btnAmpToPc = syncBox.addButton("Amp → PC (Read Amp)", QMessageBox::ActionRole);
+            QPushButton *btnPcToAmp = syncBox.addButton("PC → Amp (Write Library)", QMessageBox::ActionRole);
+            syncBox.addButton("Skip", QMessageBox::RejectRole);
+
+            syncBox.exec();
+            if (syncBox.clickedButton() == btnAmpToPc) {
                 startFullBackup(false);
-            });
+            } else if (syncBox.clickedButton() == btnPcToAmp) {
+                startFullRestore();
+            }
         }
     });
 }
@@ -2092,51 +2182,39 @@ void MainWindow::switchToPreset(int targetPreset)
                                       ? m_workingPresets[m_currentPreset]
                                       : captureCurrentUiState();
 
-        QMessageBox msgBox(this);
-        msgBox.setWindowTitle("Modified preset");
-        msgBox.setIcon(QMessageBox::Question);
-        msgBox.setText(QString("Preset #%1 (%2) has been modified.")
-                           .arg(m_currentPreset + 1)
-                           .arg(modifiedData.name));
-        msgBox.setInformativeText("Do you want to save your changes before switching presets ?");
+        auto reply = QMessageBox::question(this,
+                                           "Modified Preset",
+                                           QString("Preset #%1 (%2) has been modified.\n\n"
+                                                   "Save changes to Disk & Amplifier before switching?")
+                                               .arg(m_currentPreset + 1)
+                                               .arg(modifiedData.name),
+                                           QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
 
-        QPushButton *btnBoth   = msgBox.addButton("Both (HD + Amp)", QMessageBox::AcceptRole);
-        QPushButton *btnHd     = msgBox.addButton("hard drive (HD)", QMessageBox::ActionRole);
-        QPushButton *btnAmp    = msgBox.addButton("Amplifier (Amp)", QMessageBox::ActionRole);
-        QPushButton *btnIgnore = msgBox.addButton("Discard", QMessageBox::DestructiveRole);
-        QPushButton *btnCancel = msgBox.addButton("Cancel", QMessageBox::RejectRole);
-
-        msgBox.exec();
-        QAbstractButton *clicked = msgBox.clickedButton();
-
-        // Si l'utilisateur clique sur Annuler (ou ferme la croix), on reste sur le preset actuel
-        if (clicked == btnCancel || clicked == nullptr) {
+        // Si Annuler : reste sur le preset actuel
+        if (reply == QMessageBox::Cancel) {
             return;
         }
 
-        m_workingPresets[m_currentPreset] = modifiedData;
+        // Si Oui : enregistre simultanément sur le disque dur ET dans l'amplificateur
+        if (reply == QMessageBox::Yes) {
+            m_workingPresets[m_currentPreset] = modifiedData;
 
-        // 1. Sauvegarde sur le disque dur (backup_gm40.gm40)
-        if (clicked == btnHd || clicked == btnBoth) {
             QSettings settings("HughesKettner", "GM40Remote");
-            QString configDir = QFileInfo(settings.fileName()).absolutePath();
+            QString configDir  = QFileInfo(settings.fileName()).absolutePath();
             QDir().mkpath(configDir);
-            saveGm40File(configDir + "/backup_gm40.gm40");
-        }
+            QString targetFile = (!m_currentLibraryPath.isEmpty() && !m_currentLibraryPath.startsWith(":/"))
+                                     ? m_currentLibraryPath
+                                     : (configDir + "/backup_gm40.gm40");
 
-        // 2. Sauvegarde dans la mémoire flash de l'amplificateur
-        if (clicked == btnAmp || clicked == btnBoth) {
-            if (!seq) {
-                QMessageBox::warning(this, "MIDI Disconnected", "Cannot write to amplifier: MIDI cable not connected");
-            } else {
+            saveGm40File(targetFile);
+
+            if (seq) {
                 sendPresetToAmp(m_currentPreset, modifiedData);
-                ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>💾 Preset %1 written to internal amp memory.</font>")
+                ui->midiLog->appendHtml(QString("<font color='#ff4d4d'>💾 [SYNC] Preset %1 saved to Disk &amp; Amplifier.</font>")
                                             .arg(m_currentPreset + 1));
             }
-        }
-
-        // 3. Si Ignorer : on annule les modifications en mémoire vive en restaurant l'original
-        if (clicked == btnIgnore) {
+        } else {
+            // Si Non (Discard) : annule les modifications en restaurant l'original
             m_workingPresets[m_currentPreset] = m_originalPresets[m_currentPreset];
         }
     }

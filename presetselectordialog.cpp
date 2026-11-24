@@ -20,6 +20,14 @@ PresetSelectorDialog::PresetSelectorDialog(const QStringList &presetNames, int c
 
         auto *item = new QListWidgetItem(label, ui->presetListWidget);
         item->setData(Qt::UserRole, i); // Sauvegarde l'index exact (0..127)
+
+        // Style gris et italique pour les emplacements vides
+        if (presetNames.at(i).compare("Empty Preset", Qt::CaseInsensitive) == 0) {
+            item->setForeground(QColor("#888888"));
+            QFont f = item->font();
+            f.setItalic(true);
+            item->setFont(f);
+        }
     }
 
     // Sélectionne et centre sur le preset actif

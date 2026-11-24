@@ -9,6 +9,8 @@
 #include <QMessageBox>
 #include <QTextStream>
 #include <QDir>
+#include <QDropEvent>
+#include <QVBoxLayout>
 #include <cmath>
 #include <algorithm>
 
@@ -21,6 +23,51 @@ LibraryEditorDialog::LibraryEditorDialog(const QVector<PresetData> &activePreset
     , m_leftPath(activeLibraryPath)
 {
     ui->setupUi(this);
+
+    // 1. Active la sélection multiple et le glisser-déposer (Droite -> Gauche)
+    ui->listLeft->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    ui->listRight->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+    ui->listRight->setDragEnabled(true);
+    ui->listRight->setDragDropMode(QAbstractItemView::DragOnly);
+
+    ui->listLeft->setAcceptDrops(true);
+    ui->listLeft->setDropIndicatorShown(true);
+    ui->listLeft->setDragDropMode(QAbstractItemView::DropOnly);
+    ui->listLeft->viewport()->installEventFilter(this);
+    // 2. Ajoute dynamiquement la case à cocher "Auto-Audition" sous le bouton Audition
+    m_chkAutoAudition = new QCheckBox("Auto-Audition on click", this);
+    m_chkAutoAudition->setToolTip("Automatically send the selected preset to the amplifier when clicked");
+    if (auto *actionsLayout = qobject_cast<QVBoxLayout*>(ui->actionsGroup->layout())) {
+        int auditionIdx = actionsLayout->indexOf(ui->btnAudition);
+        if (auditionIdx >= 0) {
+            actionsLayout->insertWidget(auditionIdx + 1, m_chkAutoAudition);
+        } else {
+            actionsLayout->addWidget(m_chkAutoAudition);
+        }
+    }
+    // 3. Création dynamique du panneau de prévisualisation des réglages en bas de la fenêtre
+    m_lblPreview = new QLabel(this);
+    m_lblPreview->setWordWrap(true);
+    m_lblPreview->setTextFormat(Qt::RichText);
+    m_lblPreview->setStyleSheet(
+        "QLabel {"
+        "  background-color: #1e2229;"
+        "  color: #e0e6ed;"
+        "  border: 1px solid #3a404c;"
+        "  border-radius: 6px;"
+        "  padding: 8px 12px;"
+        "  font-size: 12px;"
+        "}"
+        );
+    if (auto *mainLay = qobject_cast<QVBoxLayout*>(this->layout())) {
+        int btnBoxIdx = mainLay->indexOf(ui->buttonBox);
+        if (btnBoxIdx >= 0) {
+            mainLay->insertWidget(btnBoxIdx, m_lblPreview);
+        } else {
+            mainLay->addWidget(m_lblPreview);
+        }
+    }
 
     // Affiche le nom du fichier actif à gauche
     QString leftDisplay = m_leftPath.isEmpty() ? "Unsaved Library" : QFileInfo(m_leftPath).fileName();
@@ -72,18 +119,73 @@ LibraryEditorDialog::LibraryEditorDialog(const QVector<PresetData> &activePreset
     // Double-clic à gauche = Renommer
     connect(ui->listLeft, &QListWidget::itemDoubleClicked, this, &LibraryEditorDialog::onRenameLeft);
 
-    // Pré-écoute en direct sur l'ampli
+    // Pré-écoute manuelle sur l'ampli (depuis gauche ou droite)
     connect(ui->btnAudition, &QPushButton::clicked, this, [this]() {
+        if (ui->listRight->hasFocus() && ui->listRight->currentRow() >= 0) {
+            int rRow = ui->listRight->currentRow();
+            if (rRow < m_rightPresets.size()) emit auditionPresetRequested(m_rightPresets[rRow]);
+            return;
+        }
         int row = ui->listLeft->currentRow();
         if (row >= 0 && row < m_leftPresets.size()) {
             emit auditionPresetRequested(m_leftPresets[row]);
         }
     });
+
+    // Clic / sélection dans la bibliothèque active (gauche)
+    connect(ui->listLeft, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row >= 0 && row < m_leftPresets.size()) {
+            updatePreview(m_leftPresets[row], "Active Library");
+            if (m_chkAutoAudition && m_chkAutoAudition->isChecked()) {
+                emit auditionPresetRequested(m_leftPresets[row]);
+            }
+        }
+    });
+    // Clic / sélection dans la bibliothèque source (droite)
+    connect(ui->listRight, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row >= 0 && row < m_rightPresets.size()) {
+            updatePreview(m_rightPresets[row], "Source Library");
+            if (m_chkAutoAudition && m_chkAutoAudition->isChecked()) {
+                emit auditionPresetRequested(m_rightPresets[row]);
+            }
+        }
+    });
+    // Initialise l'aperçu sur le premier preset actif dès l'ouverture
+    if (!m_leftPresets.isEmpty()) {
+        updatePreview(m_leftPresets[0], "Active Library");
+    }
 }
 
 LibraryEditorDialog::~LibraryEditorDialog()
 {
     delete ui;
+}
+
+bool LibraryEditorDialog::eventFilter(QObject *obj, QEvent *event)
+{
+    // Interception du glisser-déposer depuis la colonne de droite vers la colonne de gauche
+    if (obj == ui->listLeft->viewport()) {
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+            auto *dragEvent = static_cast<QDropEvent*>(event);
+            if (dragEvent->source() == ui->listRight) {
+                dragEvent->acceptProposedAction();
+                return true;
+            }
+        } else if (event->type() == QEvent::Drop) {
+            auto *dropEvent = static_cast<QDropEvent*>(event);
+            if (dropEvent->source() == ui->listRight) {
+                QListWidgetItem *targetItem = ui->listLeft->itemAt(dropEvent->position().toPoint());
+                int destRow = targetItem ? ui->listLeft->row(targetItem) : ui->listLeft->currentRow();
+                if (destRow < 0) destRow = 0;
+
+                ui->listLeft->setCurrentRow(destRow);
+                onCopyRightToLeft(); // Importe la sélection (simple ou multiple) à l'endroit déposé
+                dropEvent->acceptProposedAction();
+                return true;
+            }
+        }
+    }
+    return QDialog::eventFilter(obj, event);
 }
 
 QString LibraryEditorDialog::formatPresetRow(int index, const PresetData &p) const
@@ -103,21 +205,80 @@ QString LibraryEditorDialog::formatPresetRow(int index, const PresetData &p) con
         .arg(channels.at(chIdx));
 }
 
+void LibraryEditorDialog::updatePreview(const PresetData &p, const QString &sourceTag)
+{
+    if (!m_lblPreview) return;
+
+    const QStringList channels   = {"Clean", "Crunch", "Lead", "Ultra"};
+    const QStringList modTypes   = {"Chorus", "Flanger", "Phaser", "Tremolo"};
+    const QStringList soakLevels = {"No Speaker", "1W", "5W", "20W", "40W"};
+
+    int chIdx   = std::clamp(static_cast<int>(std::round(p.channelType / 42.0)), 0, 3);
+    int soakIdx = std::clamp(static_cast<int>(std::round(p.powerSoak / 31.0)), 0, 4);
+    int modType = std::clamp(p.modType / 64, 0, 3);
+    int modRate = (p.modType == 255) ? 63 : (p.modType % 64);
+
+    // Conversion approximative du Delay Time (0..255) en ms (51 ms à 1360 ms)
+    int delayMs = static_cast<int>(std::round(51.0 + (p.delayTime * 5.13333)));
+
+    QString boostStr = (p.channelBoost != 0) ? "<font color='#ff5555'><b>ON</b></font>" : "OFF";
+    QString gateStr  = (p.noiseGate != 0)    ? "<font color='#45e28a'><b>ON</b></font>" : "OFF";
+    QString loopStr  = (p.fxLoop != 0)       ? "<font color='#45e28a'><b>ON</b></font>" : "OFF";
+
+    QString html = QString(
+                       "<b>[%1] #%2 — %3</b> &nbsp;|&nbsp; "
+                       "Channel: <font color='#4da6ff'><b>%4</b></font> &nbsp;|&nbsp; "
+                       "Power Soak: <b>%5</b> &nbsp;|&nbsp; "
+                       "Boost: %6 &nbsp;|&nbsp; Noise Gate: %7 &nbsp;|&nbsp; FX Loop: %8<br>"
+                       "<b>Preamp &amp; EQ:</b> Gain: <b>%9</b> &nbsp;•&nbsp; Vol: <b>%10</b> &nbsp;•&nbsp; "
+                       "Bass: <b>%11</b> &nbsp;•&nbsp; Mid: <b>%12</b> &nbsp;•&nbsp; Treble: <b>%13</b> &nbsp;•&nbsp; "
+                       "Resonance: <b>%14</b> &nbsp;•&nbsp; Presence: <b>%15</b><br>"
+                       "<b>Effects:</b> Reverb: <b>%16</b> &nbsp;|&nbsp; "
+                       "Delay: <b>%17</b> (%18 ms, FB: %19) &nbsp;|&nbsp; "
+                       "Modulation: <b>%20</b> (Int: %21, Rate: %22)"
+                       )
+                       .arg(sourceTag)
+                       .arg(p.number, 3, 10, QChar('0'))
+                       .arg(p.name.toHtmlEscaped())
+                       .arg(channels.at(chIdx))
+                       .arg(soakLevels.at(soakIdx))
+                       .arg(boostStr, gateStr, loopStr)
+                       .arg(p.gain).arg(p.volume)
+                       .arg(p.bass).arg(p.mid).arg(p.treble)
+                       .arg(p.resonance).arg(p.presence)
+                       .arg(p.reverb)
+                       .arg(p.delayLevel).arg(delayMs).arg(p.delayFeedback)
+                       .arg(modTypes.at(modType)).arg(p.modIntensity).arg(modRate);
+
+    m_lblPreview->setText(html);
+}
+
+
 void LibraryEditorDialog::refreshLeftList()
 {
     int prevRow = ui->listLeft->currentRow();
+    ui->listLeft->blockSignals(true);
     ui->listLeft->clear();
 
     for (int i = 0; i < m_leftPresets.size(); ++i) {
         m_leftPresets[i].number = i + 1;
         auto *item = new QListWidgetItem(formatPresetRow(i, m_leftPresets[i]), ui->listLeft);
         item->setData(Qt::UserRole, i);
+
+        // Style gris et italique pour les emplacements vides
+        if (m_leftPresets[i].name.compare("Empty Preset", Qt::CaseInsensitive) == 0) {
+            item->setForeground(QColor("#888888"));
+            QFont f = item->font();
+            f.setItalic(true);
+            item->setFont(f);
+        }
     }
 
     if (prevRow >= 0 && prevRow < ui->listLeft->count()) {
         ui->listLeft->setCurrentRow(prevRow);
     }
-    // Réapplique le filtre actif si présent
+    ui->listLeft->blockSignals(false);
+
     if (!ui->searchLeft->text().isEmpty()) {
         emit ui->searchLeft->textChanged(ui->searchLeft->text());
     }
@@ -125,15 +286,27 @@ void LibraryEditorDialog::refreshLeftList()
 
 void LibraryEditorDialog::refreshRightList()
 {
+    ui->listRight->blockSignals(true);
     ui->listRight->clear();
     for (int i = 0; i < m_rightPresets.size(); ++i) {
         auto *item = new QListWidgetItem(formatPresetRow(i, m_rightPresets[i]), ui->listRight);
         item->setData(Qt::UserRole, i);
+
+        // Style gris et italique pour les emplacements vides
+        if (m_rightPresets[i].name.compare("Empty Preset", Qt::CaseInsensitive) == 0) {
+            item->setForeground(QColor("#888888"));
+            QFont f = item->font();
+            f.setItalic(true);
+            item->setFont(f);
+        }
     }
+    ui->listRight->blockSignals(false);
+
     if (!ui->searchRight->text().isEmpty()) {
         emit ui->searchRight->textChanged(ui->searchRight->text());
     }
 }
+
 
 void LibraryEditorDialog::onLoadRightFile()
 {
@@ -154,29 +327,51 @@ void LibraryEditorDialog::onLoadRightFile()
 
 void LibraryEditorDialog::onCopyRightToLeft()
 {
-    int srcRow  = ui->listRight->currentRow();
-    int destRow = ui->listLeft->currentRow();
-    if (srcRow < 0 || srcRow >= m_rightPresets.size() || destRow < 0 || destRow >= m_leftPresets.size()) return;
+    QList<QListWidgetItem*> selectedRight = ui->listRight->selectedItems();
+    int destStartRow = ui->listLeft->currentRow();
 
-    PresetData imported = m_rightPresets[srcRow];
-    imported.number = destRow + 1;
-    m_leftPresets[destRow] = imported;
+    if (selectedRight.isEmpty() || destStartRow < 0 || destStartRow >= m_leftPresets.size()) return;
 
+    // Trie les éléments sélectionnés par ordre croissant d'index
+    QList<int> srcIndices;
+    for (QListWidgetItem *item : selectedRight) {
+        srcIndices.append(ui->listRight->row(item));
+    }
+    std::sort(srcIndices.begin(), srcIndices.end());
+
+    // Demande confirmation si plusieurs presets vont être écrasés
+    if (srcIndices.size() > 1) {
+        int endSlot = std::min(128, destStartRow + static_cast<int>(srcIndices.size()));
+        auto reply = QMessageBox::question(this,
+                                           "Batch Import",
+                                           QString("Import %1 presets into slots #%2 to #%3?")
+                                               .arg(srcIndices.size())
+                                               .arg(destStartRow + 1)
+                                               .arg(endSlot),
+                                           QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes) return;
+    }
+    int targetRow = destStartRow;
+    for (int srcRow : srcIndices) {
+        if (targetRow >= m_leftPresets.size()) break;
+        if (srcRow >= 0 && srcRow < m_rightPresets.size()) {
+            PresetData imported = m_rightPresets[srcRow];
+            imported.number = targetRow + 1;
+            m_leftPresets[targetRow] = imported;
+            targetRow++;
+        }
+    }
     refreshLeftList();
-    ui->listLeft->setCurrentRow(destRow);
+    ui->listLeft->setCurrentRow(destStartRow);
 }
-
 void LibraryEditorDialog::onCopyLeftInternal()
 {
     int srcRow = ui->listLeft->currentRow();
     if (srcRow < 0 || srcRow >= m_leftPresets.size()) return;
-
     QStringList names;
     for (const auto &p : m_leftPresets) names.append(p.name);
-
     PresetSelectorDialog dlg(names, srcRow, this);
     dlg.setWindowTitle(QString("Copy '%1' to which slot?").arg(m_leftPresets[srcRow].name));
-
     if (dlg.exec() == QDialog::Accepted) {
         int destRow = dlg.selectedPresetIndex();
         if (destRow >= 0 && destRow < m_leftPresets.size()) {
@@ -188,18 +383,14 @@ void LibraryEditorDialog::onCopyLeftInternal()
         }
     }
 }
-
 void LibraryEditorDialog::onSwapLeftInternal()
 {
     int srcRow = ui->listLeft->currentRow();
     if (srcRow < 0 || srcRow >= m_leftPresets.size()) return;
-
     QStringList names;
     for (const auto &p : m_leftPresets) names.append(p.name);
-
     PresetSelectorDialog dlg(names, srcRow, this);
     dlg.setWindowTitle(QString("Swap '%1' with which slot?").arg(m_leftPresets[srcRow].name));
-
     if (dlg.exec() == QDialog::Accepted) {
         int destRow = dlg.selectedPresetIndex();
         if (destRow >= 0 && destRow < m_leftPresets.size() && destRow != srcRow) {
@@ -209,32 +400,26 @@ void LibraryEditorDialog::onSwapLeftInternal()
         }
     }
 }
-
 void LibraryEditorDialog::onMoveUp()
 {
     int row = ui->listLeft->currentRow();
     if (row <= 0 || row >= m_leftPresets.size()) return;
-
     std::swap(m_leftPresets[row], m_leftPresets[row - 1]);
     refreshLeftList();
     ui->listLeft->setCurrentRow(row - 1);
 }
-
 void LibraryEditorDialog::onMoveDown()
 {
     int row = ui->listLeft->currentRow();
     if (row < 0 || row >= m_leftPresets.size() - 1) return;
-
     std::swap(m_leftPresets[row], m_leftPresets[row + 1]);
     refreshLeftList();
     ui->listLeft->setCurrentRow(row + 1);
 }
-
 void LibraryEditorDialog::onRenameLeft()
 {
     int row = ui->listLeft->currentRow();
     if (row < 0 || row >= m_leftPresets.size()) return;
-
     bool ok = false;
     QString newName = QInputDialog::getText(this,
                                             "Rename Preset",
@@ -248,35 +433,37 @@ void LibraryEditorDialog::onRenameLeft()
         ui->listLeft->setCurrentRow(row);
     }
 }
-
 void LibraryEditorDialog::onInitLeftPreset()
 {
-    int row = ui->listLeft->currentRow();
-    if (row < 0 || row >= m_leftPresets.size()) return;
-
-    auto reply = QMessageBox::question(this,
-                                       "Reset Preset",
-                                       QString("Reset slot #%1 (%2) to a clean default template?")
-                                           .arg(row + 1)
-                                           .arg(m_leftPresets[row].name),
-                                       QMessageBox::Yes | QMessageBox::No);
+    QList<QListWidgetItem*> selected = ui->listLeft->selectedItems();
+    if (selected.isEmpty()) return;
+    QString msg = (selected.size() == 1)
+                      ? QString("Reset slot #%1 (%2) to a clean default template?")
+                            .arg(ui->listLeft->row(selected.first()) + 1)
+                            .arg(m_leftPresets[ui->listLeft->row(selected.first())].name)
+                      : QString("Reset %1 selected presets to a clean default template?")
+                            .arg(selected.size());
+    auto reply = QMessageBox::question(this, "Reset Preset(s)", msg, QMessageBox::Yes | QMessageBox::No);
     if (reply != QMessageBox::Yes) return;
-
-    PresetData cleanDefault;
-    cleanDefault.number        = row + 1;
-    cleanDefault.name          = QString("New Clean %1").arg(row + 1);
-    cleanDefault.gain          = 80;
-    cleanDefault.volume        = 128;
-    cleanDefault.bass          = 128;
-    cleanDefault.mid           = 128;
-    cleanDefault.treble        = 128;
-    cleanDefault.resonance     = 128;
-    cleanDefault.presence      = 128;
-    cleanDefault.channelType   = 0; // Clean
-    cleanDefault.powerSoak     = 32; // 1W
-    m_leftPresets[row] = cleanDefault;
+    for (QListWidgetItem *item : selected) {
+        int row = ui->listLeft->row(item);
+        if (row >= 0 && row < m_leftPresets.size()) {
+            PresetData cleanDefault;
+            cleanDefault.number        = row + 1;
+            cleanDefault.name          = "Empty Preset";
+            cleanDefault.gain          = 80;
+            cleanDefault.volume        = 128;
+            cleanDefault.bass          = 128;
+            cleanDefault.mid           = 128;
+            cleanDefault.treble        = 128;
+            cleanDefault.resonance     = 128;
+            cleanDefault.presence      = 128;
+            cleanDefault.channelType   = 0;  // Clean
+            cleanDefault.powerSoak     = 32; // 1W
+            m_leftPresets[row] = cleanDefault;
+        }
+    }
     refreshLeftList();
-    ui->listLeft->setCurrentRow(row);
 }
 void LibraryEditorDialog::onSaveLeft()
 {
@@ -378,3 +565,4 @@ bool LibraryEditorDialog::saveGm40ToFile(const QString &filePath, const QVector<
     }
     return true;
 }
+

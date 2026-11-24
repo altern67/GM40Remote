@@ -3,7 +3,10 @@
 
 #include <QDialog>
 #include <QVector>
+#include <QCheckBox>
 #include "mainwindow.h"
+#include <QLabel>
+
 
 namespace Ui {
 class LibraryEditorDialog;
@@ -19,13 +22,14 @@ public:
                                  QWidget *parent = nullptr);
     ~LibraryEditorDialog();
 
-    // Récupère la bibliothèque modifiée lorsque l'utilisateur valide
     QVector<PresetData> modifiedPresets() const { return m_leftPresets; }
     QString currentLibraryPath() const { return m_leftPath; }
 
 signals:
-    // Signal optionnel pour pré-écouter un preset sur l'ampli en direct
     void auditionPresetRequested(const PresetData &preset);
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onLoadRightFile();
@@ -45,7 +49,9 @@ private:
     QVector<PresetData> m_rightPresets;
     QString m_leftPath;
     QString m_rightPath;
-
+    QCheckBox *m_chkAutoAudition = nullptr;
+    QLabel *m_lblPreview = nullptr;
+    void updatePreview(const PresetData &p, const QString &sourceTag);
     void refreshLeftList();
     void refreshRightList();
     QString formatPresetRow(int index, const PresetData &p) const;
